@@ -165,6 +165,13 @@ class InCallManager {
             console.log("ios doesn't support requestAudioFocus()");
         }
     }
+    fixCallkitSpeakerUI() {
+        if (Platform.OS === 'ios') {
+            _InCallManager.fixCallkitSpeakerUI();
+        } else {
+            console.log("Android doesn't require fixCallkitSpeakerUI()");
+        }
+    }
 }
 
 export default new InCallManager();
