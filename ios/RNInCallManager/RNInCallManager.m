@@ -15,6 +15,9 @@
 
 //static BOOL const automatic = YES;
 
+static NSString *const RNInCallManagerDidChangeAudioRoute = @"RNInCallManagerDidChangeAudioRoute";
+static NSString *const RNCallKeepDidLoadWithEvents = @"RNCallKeepDidLoadWithEvents";
+
 @implementation RNInCallManager
 {
     UIDevice *_currentDevice;
@@ -33,6 +36,7 @@
 
     //BOOL isProximitySupported;
     BOOL _proximityIsNear;
+    BOOL _bluetoothConnected;
 
     // --- tags to indicating which observer has added
     BOOL _isProximityRegistered;
@@ -42,6 +46,7 @@
     BOOL _isAudioSessionMediaServicesWereResetRegistered;
     BOOL _isAudioSessionSilenceSecondaryAudioHintRegistered;
 
+    bool _hasListeners;
     // -- notification observers
     id _proximityObserver;
     id _audioSessionInterruptionObserver;
@@ -55,6 +60,7 @@
     NSString *_origAudioCategory;
     NSString *_origAudioMode;
     BOOL _audioSessionInitialized;
+    NSMutableArray *_delayedEvents;
     int _forceSpeakerOn;
     NSString *_media;
 }
@@ -120,7 +126,7 @@ RCT_EXPORT_MODULE(InCallManager)
 - (NSArray<NSString *> *)supportedEvents
 {
     return @[@"Proximity",
-             @"WiredHeadset"];
+             @"WiredHeadset",@"DidChangeAudioRoute", RNInCallManagerDidChangeAudioRoute];
 }
 
 RCT_EXPORT_METHOD(start:(NSString *)mediaType
@@ -202,6 +208,256 @@ RCT_EXPORT_METHOD(turnScreenOff)
     NSLog(@"RNInCallManager.turnScreenOff(): ios doesn't support turnScreenOff()");
 }
 
+RCT_EXPORT_METHOD(getAudioRoutes: (RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+#ifdef DEBUG
+    NSLog(@"[getAudioRoutes]");
+#endif
+   @try {
+      
+        NSArray* inputs = [_audioSession availableInputs];
+        NSMutableArray *formatedInputs = [RNInCallManager formatAudioInputs: inputs];
+        resolve(formatedInputs);
+    }
+    @catch ( NSException *e ) {
+        NSLog(@"%@",e);
+        reject(@"Failure to get audio routes", e, nil);
+    }
+}
+
++ (NSArray *) getAudioInputs
+{
+    NSError* err = nil;
+    NSString *str = nil;
+
+    AVAudioSession* myAudioSession = [AVAudioSession sharedInstance];
+    NSString *category = [myAudioSession category];
+    NSUInteger options = [myAudioSession categoryOptions];
+
+
+    if(![category isEqualToString:AVAudioSessionCategoryPlayAndRecord] && (options != AVAudioSessionCategoryOptionAllowBluetooth) && (options !=AVAudioSessionCategoryOptionAllowBluetoothA2DP))
+    {
+        BOOL isCategorySetted = [myAudioSession setCategory:AVAudioSessionCategoryPlayAndRecord withOptions:AVAudioSessionCategoryOptionAllowBluetooth error:&err];
+        if (!isCategorySetted)
+        {
+            NSLog(@"setCategory failed");
+            [NSException raise:@"setCategory failed" format:@"error: %@", err];
+        }
+    }
+
+    BOOL isCategoryActivated = [myAudioSession setActive:YES error:&err];
+    if (!isCategoryActivated)
+    {
+        NSLog(@"[RNCallKeep][getAudioInputs] setActive failed");
+        [NSException raise:@"setActive failed" format:@"error: %@", err];
+    }
+
+    NSArray *inputs = [myAudioSession availableInputs];
+    return inputs;
+}
+
+RCT_EXPORT_METHOD(setAudioRoute: (NSString *)uuid
+                  inputName:(NSString *)inputName
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+{
+#ifdef DEBUG
+    NSLog(@"[RNCallKeep][setAudioRoutesetAudioRoute] - inputName: %@", inputName);
+#endif
+    @try {
+        NSError* err = nil;
+        AVAudioSession* myAudioSession = [AVAudioSession sharedInstance];
+        if ([inputName isEqualToString:@"Speaker"]) {
+            BOOL isOverrided = [myAudioSession overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&err];
+            if(!isOverrided){
+                [NSException raise:@"overrideOutputAudioPort failed" format:@"error: %@", err];
+            }
+            resolve(@"Speaker");
+            return;
+        }
+
+        NSArray *ports = [RNInCallManager getAudioInputs];
+        for (AVAudioSessionPortDescription *port in ports) {
+            if ([port.portName isEqualToString:inputName]) {
+                BOOL isSetted = [myAudioSession setPreferredInput:(AVAudioSessionPortDescription *)port error:&err];
+                if(!isSetted){
+                    [NSException raise:@"setPreferredInput failed" format:@"error: %@", err];
+                }
+                resolve(inputName);
+                return;
+            }
+        }
+    }
+    @catch ( NSException *e ){
+        NSLog(@"[RNCallKeep][setAudioRoute] exception: %@",e);
+        reject(@"Failure to set audio route", e, nil);
+    }
+}
+//RCT_EXPORT_METHOD(setAudioRoute: (NSString *)uuid
+//                inputName:(NSString *)inputName
+//                resolver:(RCTPromiseResolveBlock)resolve
+//                rejecter:(RCTPromiseRejectBlock)reject)
+//{
+//#ifdef DEBUG
+//    NSLog(@"[setAudioRoute] - inputName: %@", inputName);
+//#endif
+//    NSError* err = nil;
+//    NSString *str = nil;
+//
+//
+//
+//    BOOL isCategorySetted = [_audioSession setCategory:AVAudioSessionCategoryPlayAndRecord withOptions:AVAudioSessionCategoryOptionAllowBluetooth error:&err];
+//    if (!isCategorySetted)
+//    {
+//        NSLog(@"setCategory failed");
+//        [NSException raise:@"setCategory failed" format:@"error: %@", err];
+//    }
+//
+//    BOOL isCategoryActivated = [_audioSession setActive:YES error:&err];
+//    if (!isCategoryActivated)
+//    {
+//        NSLog(@"setActive failed");
+//        [NSException raise:@"setActive failed" format:@"error: %@", err];
+//    }
+//
+//    NSArray *inputs = [_audioSession availableInputs];
+////    for (AVAudioSessionPortDescription *input in inputs) {
+////            NSString * type = [RNInCallManager getAudioInputType: input.portType];
+////            if ([type isEqualToString:@"Bluetooth"]) {
+////                NSLog(@"_bluetoothConnected : TRUE");
+////                _bluetoothConnected = TRUE;
+////                break;;
+////            }
+////        }
+//
+////    NSArray *inputs = [_audioSession availableInputs];
+////    if ([inputName isEqualToString:@"Bluetooth"]) {
+////        _bluetoothConnected = TRUE;
+////    }
+//
+//    @try {
+//        NSError* err = nil;
+//        BOOL success;
+//        if ([inputName isEqualToString:@"Speaker"]) {
+//            [self speakerRoute:&err success:&success];
+//            resolve(@"Speaker");
+//            return;
+//        }
+//
+//        NSArray *ports = inputs;
+//        for (AVAudioSessionPortDescription *port in ports) {
+//
+////            NSString * type = [RNInCallManager getAudioInputType: port.portType];
+////            if ([type isEqualToString:@"Bluetooth"]) {
+////                @try {
+////                    [_audioSession setPreferredInput:port error:&err];
+////                } @catch ( NSException *e ){
+////                    NSLog(@"%@",e);
+////                }
+////
+////            }
+//
+//            if ([port.portName isEqualToString:inputName]) {
+//                [_audioSession setPreferredInput:port error:&err];
+//                resolve(inputName);
+//                return;
+//            }
+//        }
+//    }
+//    @catch ( NSException *e ){
+//        NSLog(@"%@",e);
+//        reject(@"Failure to set audio route", e, nil);
+//    }
+//}
+
+- (void)startObserving
+{
+    _hasListeners = YES;
+    if ([_delayedEvents count] > 0) {
+        [self sendEventWithName:RNCallKeepDidLoadWithEvents body:_delayedEvents];
+    }
+}
+
+- (void)stopObserving
+{
+    _hasListeners = FALSE;
+}
+- (void)sendEventWithNameWrapper:(NSString *)name body:(id)body {
+   
+    [self sendEventWithName:name body:body];
+    
+}
++ (NSMutableArray *) formatAudioInputs: (NSMutableArray *)inputs
+{
+    NSMutableArray *newInputs = [NSMutableArray new];
+    NSString * selected = [RNInCallManager getSelectedAudioRoute];
+    
+    NSMutableDictionary *speakerDict = [[NSMutableDictionary alloc]init];
+    [speakerDict setObject:@"Speaker" forKey:@"name"];
+    [speakerDict setObject:AVAudioSessionPortBuiltInSpeaker forKey:@"type"];
+    if(selected && [selected isEqualToString:AVAudioSessionPortBuiltInSpeaker]){
+        [speakerDict setObject:@YES forKey:@"selected"];
+    }
+    [newInputs addObject:speakerDict];
+
+    for (AVAudioSessionPortDescription* input in inputs)
+    {
+        NSString *str = [NSString stringWithFormat:@"PORTS :\"%@\": UID:%@", input.portName, input.UID ];
+        NSMutableDictionary *dict = [[NSMutableDictionary alloc]init];
+        [dict setObject:input.portName forKey:@"name"];
+        NSString * type = [RNInCallManager getAudioInputType: input.portType];
+        if(type)
+        {
+            if([selected isEqualToString:type]){
+                [dict setObject:@YES forKey:@"selected"];
+            }
+            [dict setObject:type forKey:@"type"];
+            [newInputs addObject:dict];
+        }
+    }
+    return newInputs;
+}
++ (NSString *) getSelectedAudioRoute
+{
+    AVAudioSession* myAudioSession = [AVAudioSession sharedInstance];
+    AVAudioSessionRouteDescription *currentRoute = [myAudioSession currentRoute];
+    NSArray *selectedOutputs = currentRoute.outputs;
+    
+    AVAudioSessionPortDescription *selectedOutput = selectedOutputs[0];
+    
+    if(selectedOutput && [selectedOutput.portType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
+        return @"Phone";
+    }
+    
+    return [RNInCallManager getAudioInputType: selectedOutput.portType];
+}
+
++ (NSString *) getAudioInputType: (NSString *) type
+{
+    if ([type isEqualToString:AVAudioSessionPortBuiltInMic]){
+        return @"Phone";
+    }
+    else if ([type isEqualToString:AVAudioSessionPortHeadsetMic]){
+        return @"Headset";
+    }
+    else if ([type isEqualToString:AVAudioSessionPortHeadphones]){
+        return @"Headset";
+    }
+    else if ([type isEqualToString:AVAudioSessionPortBluetoothHFP]){
+        return @"Bluetooth";
+    }
+    else if ([type isEqualToString:AVAudioSessionPortBluetoothA2DP]){
+        return @"Bluetooth";
+    }
+    else if ([type isEqualToString:AVAudioSessionPortBuiltInSpeaker]){
+        return @"Speaker";
+    }
+    else{
+        return nil;
+    }
+}
+
 RCT_EXPORT_METHOD(setFlashOn:(BOOL)enable
                   brightness:(nonnull NSNumber *)brightness)
 {
@@ -231,6 +487,21 @@ RCT_EXPORT_METHOD(setKeepScreenOn:(BOOL)enable)
     });
 }
 
+- (void)speakerRoute:(NSError **)error success:(BOOL *)success {
+    *success = [_audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
+                              withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker
+                                    error:nil];
+    if (!*success)  NSLog(@"Cannot set category due to error: %@", *error);
+    *success = [_audioSession setMode:AVAudioSessionModeVoiceChat error: error];
+    if (!*success)  NSLog(@"Cannot set mode due to error: %@", *error);
+    [_audioSession setPreferredOutputNumberOfChannels:0 error:nil];
+    [_audioSession overrideOutputAudioPort:[AVAudioSessionPortBuiltInSpeaker intValue] error: error];
+    if (!*success)  NSLog(@"Port override failed due to: %@", *error);
+    *success = [_audioSession setActive:YES error:error];
+    if (!*success) NSLog(@"Audio session override failed: %@", *error);
+    else NSLog(@"AudioSession override is successful ");
+}
+
 RCT_EXPORT_METHOD(setSpeakerphoneOn:(BOOL)enable)
 {
     BOOL success;
@@ -258,18 +529,7 @@ RCT_EXPORT_METHOD(setSpeakerphoneOn:(BOOL)enable)
         NSLog(@"Routing audio via Loudspeaker");
         @try {
             NSLog(@"Available routes: %@", routes[0]);
-            success = [_audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
-                        withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker
-                        error:nil];
-            if (!success)  NSLog(@"Cannot set category due to error: %@", error);
-            success = [_audioSession setMode:AVAudioSessionModeVoiceChat error: &error];
-            if (!success)  NSLog(@"Cannot set mode due to error: %@", error);
-            [_audioSession setPreferredOutputNumberOfChannels:0 error:nil];
-            [_audioSession overrideOutputAudioPort:[AVAudioSessionPortBuiltInSpeaker intValue] error: &error];
-            if (!success)  NSLog(@"Port override failed due to: %@", error);
-            success = [_audioSession setActive:YES error:&error];
-            if (!success) NSLog(@"Audio session override failed: %@", error);
-            else NSLog(@"AudioSession override is successful ");
+            [self speakerRoute:&error success:&success];
         } @catch (NSException *e) {
             NSLog(@"Error occurred while routing audio via Loudspeaker: %@", e.reason);
         }
@@ -281,6 +541,15 @@ RCT_EXPORT_METHOD(setForceSpeakerphoneOn:(int)flag)
     _forceSpeakerOn = flag;
     NSLog(@"RNInCallManager.setForceSpeakerphoneOn(): flag: %d", flag);
     [self updateAudioRoute];
+}
+
+RCT_EXPORT_METHOD(fixCallkitSpeakerUI)
+{
+
+
+
+    NSLog(@"RNInCallManager.fixCallkitSpeakerUI()");
+    [self fixCallkitSpeakerUIMain];
 }
 
 RCT_EXPORT_METHOD(setMicrophoneMute:(BOOL)enable)
@@ -437,6 +706,58 @@ RCT_EXPORT_METHOD(getIsWiredHeadsetPluggedIn:(RCTPromiseResolveBlock)resolve
     resolve(wiredHeadsetPluggedIn ? @YES : @NO);
 }
 
+
+
+
+
+- (void)fixCallkitSpeakerUIMain
+{
+    NSLog(@"RNInCallManager.fixCallkitSpeakerUI()");
+
+    int overrideAudioPort;
+    NSString *overrideAudioPortString = @"";
+    NSString *audioMode = @"";
+    audioMode = AVAudioSessionModeVideoChat;
+    if (![_audioSession.category isEqualToString:_incallAudioCategory]) {
+        [self audioSessionSetCategory:_incallAudioCategory
+                              options:0
+                           callerMemo:NSStringFromSelector(_cmd)];
+        NSLog(@"RNInCallManager.fixCallkitSpeakerUI() audio category has changed to %@", _incallAudioCategory);
+    } else {
+        NSLog(@"RNInCallManager.fixCallkitSpeakerUI() did NOT change audio category");
+    }
+
+    if (audioMode.length > 0) {
+        [self audioSessionSetMode:audioMode
+                       callerMemo:NSStringFromSelector(_cmd)];
+        NSLog(@"RNInCallManager.fixCallkitSpeakerUI() audio mode has changed to %@", audioMode);
+    } else {
+        NSLog(@"RNInCallManager.fixCallkitSpeakerUI() did NOT change audio mode");
+    }
+
+     audioMode = AVAudioSessionModeVoiceChat;
+
+    if (![_audioSession.category isEqualToString:_incallAudioCategory]) {
+        [self audioSessionSetCategory:_incallAudioCategory
+                              options:0
+                           callerMemo:NSStringFromSelector(_cmd)];
+        NSLog(@"RNInCallManager.fixCallkitSpeakerUI() audio category has changed to %@", _incallAudioCategory);
+    } else {
+        NSLog(@"RNInCallManager.fixCallkitSpeakerUI() did NOT change audio category");
+    }
+
+    if (audioMode.length > 0) {
+        [self audioSessionSetMode:audioMode
+                       callerMemo:NSStringFromSelector(_cmd)];
+        NSLog(@"RNInCallManager.fixCallkitSpeakerUI() audio mode has changed to %@", audioMode);
+    } else {
+        NSLog(@"RNInCallManager.fixCallkitSpeakerUI() did NOT change audio mode");
+    }
+    _media = @"audio";
+   
+    //self.debugAudioSession()
+}
+
 - (void)updateAudioRoute
 {
     NSLog(@"RNInCallManager.updateAudioRoute(): [Enter] forceSpeakerOn flag=%d media=%@ category=%@ mode=%@", _forceSpeakerOn, _media, _audioSession.category, _audioSession.mode);
@@ -454,11 +775,13 @@ RCT_EXPORT_METHOD(getIsWiredHeadsetPluggedIn:(RCTPromiseResolveBlock)resolve
     if (_forceSpeakerOn == 1) {
         // --- force ON, override speaker only, keep audio mode remain.
         overrideAudioPort = AVAudioSessionPortOverrideSpeaker;
+         _media = @"video";
         overrideAudioPortString = @".Speaker";
         if ([_media isEqualToString:@"video"]) {
             audioMode = AVAudioSessionModeVideoChat;
             [self stopProximitySensor];
         }
+        _forceSpeakerOn= 0 ;
     } else if (_forceSpeakerOn == -1) {
         // --- force off
         overrideAudioPort = AVAudioSessionPortOverrideNone;
@@ -607,6 +930,8 @@ RCT_EXPORT_METHOD(getIsWiredHeadsetPluggedIn:(RCTPromiseResolveBlock)resolve
         NSLog(@"RNInCallManager.%@: audioSession.setCategory: %@, withOptions: %lu fail: %@", callerMemo, audioCategory, (unsigned long)options, e.reason);
     }
 }
+
+
 
 - (void)audioSessionSetMode:(NSString *)audioMode
                  callerMemo:(NSString *)callerMemo
@@ -799,6 +1124,10 @@ RCT_EXPORT_METHOD(stopProximitySensor)
             NSNumber *routeChangeType = [notification.userInfo objectForKey:@"AVAudioSessionRouteChangeReasonKey"];
             NSUInteger routeChangeTypeValue = [routeChangeType unsignedIntegerValue];
 
+            [self sendEventWithNameWrapper:RNInCallManagerDidChangeAudioRoute body:@{
+                @"output": routeChangeType,
+                @"reason": _audioSession.currentRoute,
+            }];
             switch (routeChangeTypeValue) {
                 case AVAudioSessionRouteChangeReasonUnknown:
                     NSLog(@"RNInCallManager.AudioRouteChange.Reason: Unknown");
